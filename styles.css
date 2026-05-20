@@ -1,0 +1,237 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f8f6;
+  --ink: rgba(44, 48, 50, 0.88);
+  --dim: rgba(44, 48, 50, 0.42);
+  --faint: rgba(44, 48, 50, 0.11);
+  --line: rgba(68, 82, 88, 0.58);
+  --hot: rgba(16, 18, 20, 0.9);
+  --range: rgba(44, 48, 50, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Sans";
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.instrument {
+  position: fixed;
+  inset: 0;
+  min-height: 100svh;
+  touch-action: none;
+  user-select: none;
+  background:
+    linear-gradient(rgba(44, 48, 50, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(44, 48, 50, 0.045) 1px, transparent 1px),
+    var(--bg);
+  background-size: 44px 44px;
+}
+
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.topbar {
+  position: absolute;
+  left: max(16px, env(safe-area-inset-left));
+  right: max(16px, env(safe-area-inset-right));
+  top: max(14px, env(safe-area-inset-top));
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  pointer-events: none;
+}
+
+h1 {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+
+p {
+  margin: 7px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--dim);
+}
+
+button {
+  min-width: 42px;
+  min-height: 42px;
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  background: rgba(247, 248, 246, 0.74);
+  color: var(--ink);
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:active,
+button.active {
+  border-color: rgba(44, 48, 50, 0.58);
+  color: var(--hot);
+  box-shadow: 0 0 18px rgba(44, 48, 50, 0.08);
+}
+
+.primary {
+  padding: 0 15px;
+  text-transform: uppercase;
+  color: #031012;
+  background: rgba(44, 48, 50, 0.14);
+  border-color: rgba(44, 48, 50, 0.24);
+}
+
+.top-actions {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.top-actions button {
+  padding: 0 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.tools {
+  position: absolute;
+  left: max(16px, env(safe-area-inset-left));
+  top: calc(max(14px, env(safe-area-inset-top)) + 66px);
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 42px;
+  gap: 8px;
+}
+
+.tool {
+  padding: 0;
+  color: var(--dim);
+}
+
+.controls {
+  position: absolute;
+  z-index: 2;
+  left: max(16px, env(safe-area-inset-left));
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: repeat(3, minmax(74px, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  pointer-events: none;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: rgba(44, 48, 50, 0.32);
+  font-size: 10px;
+  line-height: 1;
+  text-transform: uppercase;
+  pointer-events: auto;
+}
+
+input[type="range"] {
+  width: 100%;
+  height: 12px;
+  accent-color: var(--range);
+  opacity: 0.42;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 1px;
+  background: rgba(44, 48, 50, 0.2);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  width: 7px;
+  height: 7px;
+  margin-top: -3px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(44, 48, 50, 0.34);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="range"]::-moz-range-track {
+  height: 1px;
+  background: rgba(44, 48, 50, 0.2);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 7px;
+  height: 7px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(44, 48, 50, 0.34);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.actions button {
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 11px;
+  color: rgba(44, 48, 50, 0.36);
+  border-color: rgba(44, 48, 50, 0.1);
+  background: rgba(247, 248, 246, 0.42);
+  text-transform: uppercase;
+}
+
+.hidden-file {
+  position: fixed;
+  left: -100vw;
+  top: -100vh;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .controls {
+    grid-template-columns: 1fr;
+    gap: 9px;
+  }
+
+  .actions {
+    justify-content: space-between;
+  }
+
+  .actions button {
+    flex: 1;
+  }
+
+}
