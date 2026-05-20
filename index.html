@@ -3,9 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#020405">
-    <title>Orbital Rhythm Instrument</title>
-    <link rel="stylesheet" href="styles.css?v=orbitonic-20260520-01">
+    <meta name="theme-color" content="#f7f8f6">
+    <title>ORBITONIC</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=orbitonic-20260521-08">
   </head>
   <body>
     <main class="instrument" aria-label="Orbital rhythm instrument">
@@ -16,18 +19,22 @@
           <h1>ORBITONIC</h1>
           <p id="readout">silent field</p>
         </div>
-        <div class="top-actions">
-          <button id="sampleButton" type="button" aria-label="Current sample">sample</button>
-        </div>
+        <aside class="planet-panel" aria-label="Sample planets">
+          <div class="planet-panel-head">
+            <span>samples</span>
+            <button id="samplePanelToggle" type="button" aria-label="Hide samples" aria-expanded="true">−︎</button>
+          </div>
+          <div id="planetList" class="planet-list"></div>
+        </aside>
       </header>
 
       <nav class="tools" aria-label="Instrument tools">
-        <button class="tool active" type="button" data-tool="planet" title="Planet" aria-label="Draw planet">◌</button>
-        <button class="tool" type="button" data-tool="gate" title="Start line" aria-label="Set start line">┃</button>
-        <button class="tool" type="button" data-tool="sample" title="Sample" aria-label="Assign sample">◇</button>
-        <button class="tool" type="button" data-tool="move" title="Move" aria-label="Move object">↕</button>
-        <button class="tool" type="button" data-tool="mute" title="Mute" aria-label="Mute object">◐</button>
-        <button class="tool" type="button" data-tool="delete" title="Delete" aria-label="Delete object">×</button>
+        <button class="tool active" type="button" data-tool="planet" title="Planet" aria-label="Draw planet">◌︎</button>
+        <button class="tool" type="button" data-tool="gate" title="Start line" aria-label="Set start line">┃︎</button>
+        <button class="tool" type="button" data-tool="sample" title="Sample" aria-label="Assign sample">◇︎</button>
+        <button class="tool" type="button" data-tool="move" title="Move" aria-label="Move object">↕︎</button>
+        <button class="tool" type="button" data-tool="mute" title="Mute" aria-label="Mute object">◐︎</button>
+        <button class="tool" type="button" data-tool="delete" title="Delete" aria-label="Delete object">×︎</button>
       </nav>
 
       <section class="controls" aria-label="System controls">
@@ -53,6 +60,6 @@
       <input id="sampleInput" class="hidden-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.ogg">
     </main>
 
-    <script src="app.js?v=orbitonic-20260520-01"></script>
+    <script src="app.js?v=orbitonic-20260521-08"></script>
   </body>
 </html>

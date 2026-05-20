@@ -1,6 +1,6 @@
 (() => {
   const canvas = document.getElementById("field");
-  const ctx = canvas.getContext("2d", { alpha: false });
+  const ctx = canvas.getContext("2d", { alpha: true });
   const readout = document.getElementById("readout");
   const bpmInput = document.getElementById("bpm");
   const gravityInput = document.getElementById("gravity");
@@ -10,6 +10,9 @@
   const clearButton = document.getElementById("clear");
   const sampleButton = document.getElementById("sampleButton");
   const sampleInput = document.getElementById("sampleInput");
+  const samplePanelToggle = document.getElementById("samplePanelToggle");
+  const planetList = document.getElementById("planetList");
+  const planetPanel = document.querySelector(".planet-panel");
   const toolButtons = Array.from(document.querySelectorAll(".tool"));
 
   const TAU = Math.PI * 2;
@@ -32,9 +35,14 @@
     dragging: null,
     drawing: null,
     sampleTarget: null,
-    recorder: null,
+    recorderNode: null,
+    recorderSilent: null,
     recordedChunks: [],
     recording: false,
+    recordingReady: false,
+    lastRecordingBlob: null,
+    lastRecordingUrl: "",
+    lastRecordingName: "",
     wakeLock: null,
     lastTime: performance.now(),
     pulse: [],
@@ -114,6 +122,8 @@
     canvas.style.width = `${state.width}px`;
     canvas.style.height = `${state.height}px`;
     ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+    ctx.fillStyle = "#f7f8f6";
+    ctx.fillRect(0, 0, state.width, state.height);
   }
 
   function screenToWorld(point) {
@@ -180,6 +190,8 @@
         muted: false,
         sample: null,
         sampleName: "",
+        volume: 1,
+        pitch: 0,
         activeSample: null,
         colorSeed: rnd(0, 1)
       };
@@ -196,6 +208,7 @@
     bodies.length = 0;
     state.sampleTarget = null;
     updateSampleButton(null);
+    renderPlanetList();
   }
 
   function stopBodySample(body) {
@@ -226,6 +239,58 @@
     stopButton.textContent = "start";
   }
 
+  function bodyLabel(body, index) {
+    return body.sampleName || `planet ${index + 1}`;
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function renderPlanetList() {
+    if (!planetList) return;
+    if (!bodies.length) {
+      planetList.innerHTML = '<div class="planet-empty">no samples</div>';
+      return;
+    }
+    planetList.innerHTML = bodies.map((body, index) => {
+      const selected = body === state.sampleTarget ? " selected" : "";
+      const muted = body.muted || body.orbit.muted ? " muted" : "";
+      const name = bodyLabel(body, index);
+      const safeName = escapeHtml(name);
+      const volume = Math.round(body.volume * 100);
+      const pitch = Math.round(body.pitch * 10) / 10;
+      return `
+        <article class="planet-row${selected}${muted}" data-body-id="${body.id}">
+          <div class="planet-main">
+            <button type="button" data-action="replace" title="replace sample">◇︎</button>
+            <div class="planet-name" title="${safeName}">${safeName}</div>
+            <button type="button" data-action="mute" title="mute">${body.muted ? "○︎" : "◐︎"}</button>
+            <button type="button" data-action="delete" title="delete">×︎</button>
+          </div>
+          <label class="planet-param">
+            <span>vol</span>
+            <input type="range" min="0" max="1.5" step="0.01" value="${body.volume}" data-param="volume">
+            <output>${volume}</output>
+          </label>
+          <label class="planet-param">
+            <span>pit</span>
+            <input type="range" min="-12" max="12" step="0.1" value="${body.pitch}" data-param="pitch">
+            <output>${pitch}</output>
+          </label>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function findBodyById(id) {
+    return bodies.find((body) => body.id === id) || null;
+  }
+
   function startTransport() {
     resumeAudio().then(() => {
       state.audioReady = true;
@@ -235,58 +300,153 @@
   }
 
   function startRecording() {
-    resumeAudio().then(() => {
-      if (!audio || typeof MediaRecorder === "undefined") {
+    resumeAudio()
+      .then(() => {
+        startWavRecording();
+      })
+      .catch(() => {
         recordButton.textContent = "no rec";
         window.setTimeout(() => {
-          recordButton.textContent = "rec";
+          recordButton.textContent = state.recordingReady ? "save" : "rec";
         }, 1400);
-        return;
-      }
-      state.recordedChunks = [];
-      let recorder = null;
-      try {
-        const options = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/webm")
-          ? { mimeType: "audio/webm" }
-          : undefined;
-        recorder = new MediaRecorder(audio.recorderDestination.stream, options);
-      } catch (error) {
-        recordButton.textContent = "no rec";
-        window.setTimeout(() => {
-          recordButton.textContent = "rec";
-        }, 1400);
-        return;
-      }
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data && event.data.size) state.recordedChunks.push(event.data);
       });
-      recorder.addEventListener("stop", () => {
-        const type = recorder.mimeType || "audio/webm";
-        const blob = new Blob(state.recordedChunks, { type });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const extension = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
-        link.href = url;
-        link.download = `orbitonic-${stamp}.${extension}`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 30000);
-        state.recordedChunks = [];
-      });
-      state.recorder = recorder;
-      state.recording = true;
-      recordButton.textContent = "save";
-      recorder.start();
-    });
   }
 
   function stopRecording() {
-    if (!state.recorder || state.recorder.state === "inactive") return;
-    state.recording = false;
+    if (!state.recording) return;
+    stopWavRecording();
+  }
+
+  function saveRecording() {
+    if (!state.lastRecordingBlob || !state.lastRecordingUrl) return;
+    const link = document.createElement("a");
+    link.href = state.lastRecordingUrl;
+    link.download = state.lastRecordingName || `${recordingFileStamp()}.wav`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    state.recordingReady = false;
     recordButton.textContent = "rec";
-    state.recorder.stop();
+    recordButton.classList.remove("ready");
+  }
+
+  function startWavRecording() {
+    if (!audio || !audio.comp || !audio.ctx.createScriptProcessor) {
+      recordButton.textContent = "no rec";
+      window.setTimeout(() => {
+        recordButton.textContent = state.recordingReady ? "save" : "rec";
+      }, 1400);
+      return;
+    }
+    if (state.lastRecordingUrl) {
+      URL.revokeObjectURL(state.lastRecordingUrl);
+    }
+    state.lastRecordingBlob = null;
+    state.lastRecordingUrl = "";
+    state.lastRecordingName = "";
+    state.recordingReady = false;
+    const node = audio.ctx.createScriptProcessor(4096, 2, 2);
+    const silent = audio.ctx.createGain();
+    silent.gain.value = 0;
+    state.recordedChunks = [];
+    node.onaudioprocess = (event) => {
+      if (!state.recording) return;
+      const left = new Float32Array(event.inputBuffer.getChannelData(0));
+      const right = event.inputBuffer.numberOfChannels > 1
+        ? new Float32Array(event.inputBuffer.getChannelData(1))
+        : new Float32Array(left);
+      state.recordedChunks.push([left, right]);
+      for (let channel = 0; channel < event.outputBuffer.numberOfChannels; channel += 1) {
+        event.outputBuffer.getChannelData(channel).fill(0);
+      }
+    };
+    audio.comp.connect(node);
+    node.connect(silent);
+    silent.connect(audio.ctx.destination);
+    state.recorderNode = node;
+    state.recorderSilent = silent;
+    state.recording = true;
+    state.audioReady = true;
+    state.stopped = false;
+    stopButton.textContent = "stop";
+    recordButton.textContent = "stop";
+    recordButton.classList.add("recording");
+    recordButton.classList.remove("ready");
+  }
+
+  function stopWavRecording() {
+    state.recording = false;
+    recordButton.classList.remove("recording");
+    if (state.recorderNode) {
+      try {
+        audio.comp.disconnect(state.recorderNode);
+      } catch (error) {}
+      state.recorderNode.disconnect();
+    }
+    if (state.recorderSilent) state.recorderSilent.disconnect();
+    state.recorderNode = null;
+    state.recorderSilent = null;
+    const blob = encodeWav(state.recordedChunks, audio.ctx.sampleRate);
+    state.recordedChunks = [];
+    if (!blob || !blob.size || blob.size <= 44) {
+      state.recordingReady = false;
+      recordButton.textContent = "empty";
+      window.setTimeout(() => {
+        recordButton.textContent = "rec";
+      }, 1400);
+      return;
+    }
+    state.lastRecordingBlob = blob;
+    state.lastRecordingUrl = URL.createObjectURL(blob);
+    state.lastRecordingName = `${recordingFileStamp()}.wav`;
+    state.recordingReady = true;
+    recordButton.textContent = "save";
+    recordButton.classList.add("ready");
+  }
+
+  function encodeWav(chunks, sampleRate) {
+    const frames = chunks.reduce((sum, chunk) => sum + chunk[0].length, 0);
+    const buffer = new ArrayBuffer(44 + frames * 4);
+    const view = new DataView(buffer);
+    writeString(view, 0, "RIFF");
+    view.setUint32(4, 36 + frames * 4, true);
+    writeString(view, 8, "WAVE");
+    writeString(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 2, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 4, true);
+    view.setUint16(32, 4, true);
+    view.setUint16(34, 16, true);
+    writeString(view, 36, "data");
+    view.setUint32(40, frames * 4, true);
+    let offset = 44;
+    for (const [left, right] of chunks) {
+      for (let i = 0; i < left.length; i += 1) {
+        view.setInt16(offset, clamp(left[i], -1, 1) * 0x7fff, true);
+        offset += 2;
+        view.setInt16(offset, clamp(right[i], -1, 1) * 0x7fff, true);
+        offset += 2;
+      }
+    }
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  function writeString(view, offset, value) {
+    for (let i = 0; i < value.length; i += 1) {
+      view.setUint8(offset + i, value.charCodeAt(i));
+    }
+  }
+
+  function recordingFileStamp() {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, "0");
+    return [
+      "recording",
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+      `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+    ].join("-");
   }
 
   function requestWakeLock() {
@@ -353,7 +513,7 @@
     master.connect(comp);
     comp.connect(actx.destination);
     comp.connect(recorderDestination);
-    audio = { ctx: actx, master, recorderDestination };
+    audio = { ctx: actx, master, comp, recorderDestination };
     return actx.resume().then(() => unlockAudio());
   }
 
@@ -378,6 +538,18 @@
     return Promise.resolve();
   }
 
+  function safeResumeAudio() {
+    try {
+      return Promise.resolve(resumeAudio())
+        .then(() => {
+          state.audioReady = true;
+        })
+        .catch(() => {});
+    } catch (error) {
+      return Promise.resolve();
+    }
+  }
+
   function requestSampleForBody(body) {
     if (!body) return;
     state.sampleTarget = body;
@@ -392,8 +564,13 @@
 
   function updateSampleButton(body, fallback = "sample") {
     const label = body ? currentBodyLabel(body) : fallback;
+    if (!sampleButton) return;
     sampleButton.textContent = label;
     sampleButton.title = body && body.sampleName ? body.sampleName : label;
+  }
+
+  function pitchRatio(body) {
+    return Math.pow(2, (body ? body.pitch : 0) / 12);
   }
 
   function assignSampleToBody(body, buffer, name) {
@@ -401,6 +578,7 @@
     body.sample = buffer;
     body.sampleName = name.replace(/\.[^/.]+$/, "");
     updateSampleButton(body);
+    renderPlanetList();
     trigger("sample", body.x, body.y, 0.8, body);
   }
 
@@ -419,9 +597,11 @@
     const filter = audio.ctx.createBiquadFilter();
     const speedBend = clamp((1 / body.orbit.beats) * 0.04 + energy * 0.025, 0, 0.12);
     const curveBend = kind === "snare" ? 0.08 : kind === "clap" ? -0.04 : 0;
+    const baseRate = clamp(1 + speedBend + curveBend + (body.colorSeed - 0.5) * 0.08, 0.25, 4);
+    const levelBase = 0.22 * clamp(energy, 0.35, 1.7);
 
     src.buffer = body.sample;
-    src.playbackRate.value = clamp(1 + speedBend + curveBend + (body.colorSeed - 0.5) * 0.08, 0.55, 1.8);
+    src.playbackRate.value = clamp(baseRate * pitchRatio(body), 0.25, 4);
     const duration = body.sample.duration / src.playbackRate.value;
     const fadeStart = Math.max(now + 0.02, now + duration - 0.035);
 
@@ -438,15 +618,16 @@
     filter.frequency.value = clamp(900 + (1 - y / state.height) * 7600 + energy * 1500, 700, 12000);
     filter.Q.value = 0.25 + state.chaos * 3.5;
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.22 * clamp(energy, 0.35, 1.7), now + 0.004);
-    gain.gain.setValueAtTime(0.22 * clamp(energy, 0.35, 1.7), fadeStart);
+    const level = levelBase * body.volume;
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level), now + 0.004);
+    gain.gain.setValueAtTime(Math.max(0.0001, level), fadeStart);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.025);
 
     src.connect(filter);
     filter.connect(gain);
     gain.connect(audio.master);
     const token = uid();
-    body.activeSample = { src, token };
+    body.activeSample = { src, gain, baseRate, levelBase, token };
     src.onended = () => {
       if (body.activeSample && body.activeSample.token === token) body.activeSample = null;
     };
@@ -822,6 +1003,7 @@
         const orbitIndex = orbits.indexOf(found.item.orbit);
         if (orbitIndex >= 0) orbits.splice(orbitIndex, 1);
       }
+      renderPlanetList();
     } else if (found.type === "gate") {
       stopOrbitSamples(found.orbit);
       const gateIndex = found.orbit.gates.indexOf(found.item);
@@ -832,10 +1014,13 @@
   function onPointerDown(event) {
     event.preventDefault();
     requestWakeLock();
-    resumeAudio().then(() => {
-      state.audioReady = true;
-    });
-    canvas.setPointerCapture(event.pointerId);
+    safeResumeAudio();
+    if (event.isPrimary && state.pointers.size > 0 && !state.pinch && !state.dragging && !state.drawing) {
+      state.pointers.clear();
+    }
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (error) {}
     state.pointers.set(event.pointerId, screenPosition(event));
     if (state.pointers.size === 2) {
       const points = Array.from(state.pointers.values());
@@ -864,6 +1049,7 @@
         if (found.type === "body") {
           state.sampleTarget = found.item;
           updateSampleButton(found.item);
+          renderPlanetList();
         }
         trigger("tick", pos.x, pos.y, 0.5);
       }
@@ -906,6 +1092,7 @@
         if (found.type === "body") {
           state.sampleTarget = found.item;
           updateSampleButton(found.item);
+          renderPlanetList();
         }
       } else {
         const screen = screenPosition(event);
@@ -982,6 +1169,7 @@
       const created = makeOrbit(state.drawing.x, state.drawing.y, state.drawing.r);
       state.sampleTarget = created.body;
       updateSampleButton(created.body);
+      renderPlanetList();
       requestSampleForBody(created.body);
     }
     state.drawing = null;
@@ -994,12 +1182,24 @@
     });
   });
 
-  sampleButton.addEventListener("click", () => {
-    const target = state.sampleTarget || bodies[bodies.length - 1];
-    if (target) requestSampleForBody(target);
-    state.tool = "sample";
-    toolButtons.forEach((item) => item.classList.toggle("active", item.dataset.tool === "sample"));
-  });
+  if (sampleButton) {
+    sampleButton.addEventListener("click", () => {
+      const target = state.sampleTarget || bodies[bodies.length - 1];
+      if (target) requestSampleForBody(target);
+      state.tool = "sample";
+      toolButtons.forEach((item) => item.classList.toggle("active", item.dataset.tool === "sample"));
+    });
+  }
+
+  if (samplePanelToggle && planetPanel) {
+    samplePanelToggle.addEventListener("click", () => {
+      const collapsed = !planetPanel.classList.contains("collapsed");
+      planetPanel.classList.toggle("collapsed", collapsed);
+      samplePanelToggle.textContent = collapsed ? "+︎" : "−︎";
+      samplePanelToggle.setAttribute("aria-label", collapsed ? "Show samples" : "Hide samples");
+      samplePanelToggle.setAttribute("aria-expanded", String(!collapsed));
+    });
+  }
 
   sampleInput.addEventListener("change", () => {
     const file = sampleInput.files && sampleInput.files[0];
@@ -1019,8 +1219,57 @@
       });
   });
 
+  planetList.addEventListener("click", (event) => {
+    if (event.target.closest("input")) return;
+    const row = event.target.closest(".planet-row");
+    if (!row) return;
+    const body = findBodyById(row.dataset.bodyId);
+    if (!body) return;
+    const action = event.target.dataset.action || "focus";
+    if (action === "delete") {
+      removeObject({ type: "body", item: body });
+      return;
+    }
+    state.sampleTarget = body;
+    updateSampleButton(body);
+    if (action === "mute") {
+      body.muted = !body.muted;
+      if (body.muted) stopBodySample(body);
+    } else if (action === "replace") {
+      requestSampleForBody(body);
+    }
+    renderPlanetList();
+  });
+
+  planetList.addEventListener("input", (event) => {
+    const row = event.target.closest(".planet-row");
+    if (!row || !event.target.dataset.param) return;
+    const body = findBodyById(row.dataset.bodyId);
+    if (!body) return;
+    const value = Number(event.target.value);
+    if (event.target.dataset.param === "volume") {
+      body.volume = value;
+      if (body.activeSample && body.activeSample.gain) {
+        body.activeSample.gain.gain.setValueAtTime(Math.max(0.0001, body.activeSample.levelBase * body.volume), audio.ctx.currentTime);
+      }
+    }
+    if (event.target.dataset.param === "pitch") {
+      body.pitch = value;
+      if (body.activeSample && body.activeSample.src) {
+        body.activeSample.src.playbackRate.setValueAtTime(clamp(body.activeSample.baseRate * pitchRatio(body), 0.25, 4), audio.ctx.currentTime);
+      }
+    }
+    const output = event.target.parentElement.querySelector("output");
+    if (output) {
+      output.textContent = event.target.dataset.param === "volume"
+        ? String(Math.round(body.volume * 100))
+        : String(Math.round(body.pitch * 10) / 10);
+    }
+  });
+
   recordButton.addEventListener("click", () => {
     if (state.recording) stopRecording();
+    else if (state.recordingReady) saveRecording();
     else startRecording();
   });
   bpmInput.addEventListener("input", () => { state.bpm = Number(bpmInput.value); });
@@ -1036,6 +1285,7 @@
   canvas.addEventListener("pointermove", onPointerMove, { passive: false });
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("lostpointercapture", onPointerUp);
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     const screen = screenPosition(event);
