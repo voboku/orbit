@@ -5,6 +5,7 @@
   const bpmInput = document.getElementById("bpm");
   const gravityInput = document.getElementById("gravity");
   const chaosInput = document.getElementById("chaos");
+  const recordButton = document.getElementById("record");
   const stopButton = document.getElementById("stop");
   const clearButton = document.getElementById("clear");
   const sampleButton = document.getElementById("sampleButton");
@@ -25,9 +26,16 @@
     audioReady: false,
     stopped: false,
     muted: false,
+    camera: { x: 0, y: 0, scale: 1 },
+    pointers: new Map(),
+    pinch: null,
     dragging: null,
     drawing: null,
     sampleTarget: null,
+    recorder: null,
+    recordedChunks: [],
+    recording: false,
+    wakeLock: null,
     lastTime: performance.now(),
     pulse: [],
     intersections: [],
@@ -108,6 +116,28 @@
     ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   }
 
+  function screenToWorld(point) {
+    return {
+      x: (point.x - state.camera.x) / state.camera.scale,
+      y: (point.y - state.camera.y) / state.camera.scale
+    };
+  }
+
+  function screenPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  }
+
+  function zoomAt(screenPoint, nextScale) {
+    const before = screenToWorld(screenPoint);
+    state.camera.scale = clamp(nextScale, 0.25, 4);
+    state.camera.x = screenPoint.x - before.x * state.camera.scale;
+    state.camera.y = screenPoint.y - before.y * state.camera.scale;
+  }
+
   function makeOrbit(x, y, radius, tilt = rnd(-0.35, 0.35), options = {}) {
     const orbit = {
       id: uid(),
@@ -161,21 +191,32 @@
   }
 
   function resetField() {
+    stopActiveSamples();
     orbits.length = 0;
     bodies.length = 0;
     state.sampleTarget = null;
     updateSampleButton(null);
   }
 
+  function stopBodySample(body) {
+    if (!body || !body.activeSample) return;
+    try {
+      body.activeSample.src.stop();
+    } catch (error) {
+      // The source may already be stopped.
+    }
+    body.activeSample = null;
+  }
+
+  function stopOrbitSamples(orbit) {
+    for (const body of bodies) {
+      if (body.orbit === orbit) stopBodySample(body);
+    }
+  }
+
   function stopActiveSamples() {
     for (const body of bodies) {
-      if (!body.activeSample) continue;
-      try {
-        body.activeSample.src.stop();
-      } catch (error) {
-        // The source may already be stopped.
-      }
-      body.activeSample = null;
+      stopBodySample(body);
     }
   }
 
@@ -186,19 +227,80 @@
   }
 
   function startTransport() {
-    initAudio().then(() => {
+    resumeAudio().then(() => {
       state.audioReady = true;
       state.stopped = false;
       stopButton.textContent = "stop";
     });
   }
 
+  function startRecording() {
+    resumeAudio().then(() => {
+      if (!audio || typeof MediaRecorder === "undefined") {
+        recordButton.textContent = "no rec";
+        window.setTimeout(() => {
+          recordButton.textContent = "rec";
+        }, 1400);
+        return;
+      }
+      state.recordedChunks = [];
+      let recorder = null;
+      try {
+        const options = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported("audio/webm")
+          ? { mimeType: "audio/webm" }
+          : undefined;
+        recorder = new MediaRecorder(audio.recorderDestination.stream, options);
+      } catch (error) {
+        recordButton.textContent = "no rec";
+        window.setTimeout(() => {
+          recordButton.textContent = "rec";
+        }, 1400);
+        return;
+      }
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size) state.recordedChunks.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        const type = recorder.mimeType || "audio/webm";
+        const blob = new Blob(state.recordedChunks, { type });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const extension = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+        link.href = url;
+        link.download = `orbitonic-${stamp}.${extension}`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+        state.recordedChunks = [];
+      });
+      state.recorder = recorder;
+      state.recording = true;
+      recordButton.textContent = "save";
+      recorder.start();
+    });
+  }
+
+  function stopRecording() {
+    if (!state.recorder || state.recorder.state === "inactive") return;
+    state.recording = false;
+    recordButton.textContent = "rec";
+    state.recorder.stop();
+  }
+
+  function requestWakeLock() {
+    if (!navigator.wakeLock || state.wakeLock) return;
+    navigator.wakeLock.request("screen").then((lock) => {
+      state.wakeLock = lock;
+      lock.addEventListener("release", () => {
+        state.wakeLock = null;
+      });
+    }).catch(() => {});
+  }
+
   function pointerPosition(event) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
-    };
+    return screenToWorld(screenPosition(event));
   }
 
   function rotatePoint(x, y, tilt) {
@@ -240,17 +342,40 @@
   }
 
   function initAudio() {
-    if (audio) return audio.ctx.resume();
+    if (audio) return audio.ctx.resume().then(() => unlockAudio());
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     if (!AudioContext) return Promise.resolve();
     const actx = new AudioContext();
     const master = actx.createGain();
     const comp = actx.createDynamicsCompressor();
+    const recorderDestination = actx.createMediaStreamDestination();
     master.gain.value = 0.72;
     master.connect(comp);
     comp.connect(actx.destination);
-    audio = { ctx: actx, master };
-    return actx.resume();
+    comp.connect(recorderDestination);
+    audio = { ctx: actx, master, recorderDestination };
+    return actx.resume().then(() => unlockAudio());
+  }
+
+  function unlockAudio() {
+    if (!audio) return Promise.resolve();
+    const now = audio.ctx.currentTime;
+    const buffer = audio.ctx.createBuffer(1, 1, audio.ctx.sampleRate);
+    const src = audio.ctx.createBufferSource();
+    const gain = audio.ctx.createGain();
+    gain.gain.value = 0.0001;
+    src.buffer = buffer;
+    src.connect(gain);
+    gain.connect(audio.master);
+    src.start(now);
+    src.stop(now + 0.01);
+    return Promise.resolve();
+  }
+
+  function resumeAudio() {
+    if (!audio) return initAudio();
+    if (audio.ctx.state !== "running") return audio.ctx.resume();
+    return Promise.resolve();
   }
 
   function requestSampleForBody(body) {
@@ -272,6 +397,7 @@
   }
 
   function assignSampleToBody(body, buffer, name) {
+    stopBodySample(body);
     body.sample = buffer;
     body.sampleName = name.replace(/\.[^/.]+$/, "");
     updateSampleButton(body);
@@ -528,6 +654,8 @@
     ctx.fillRect(0, 0, state.width, state.height);
 
     ctx.save();
+    ctx.translate(state.camera.x, state.camera.y);
+    ctx.scale(state.camera.scale, state.camera.scale);
     ctx.globalCompositeOperation = "source-over";
     for (const orbit of orbits) drawEllipse(orbit, time);
 
@@ -671,17 +799,18 @@
     return best;
   }
 
+  function pointerDistance(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  function pointerCenter(a, b) {
+    return { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+  }
+
   function removeObject(found) {
     if (!found) return;
     if (found.type === "body") {
-      if (found.item.activeSample) {
-        try {
-          found.item.activeSample.src.stop();
-        } catch (error) {
-          // The source may already be stopped.
-        }
-        found.item.activeSample = null;
-      }
+      stopBodySample(found.item);
       const bodyIndex = bodies.indexOf(found.item);
       if (bodyIndex >= 0) bodies.splice(bodyIndex, 1);
       if (state.sampleTarget === found.item) {
@@ -694,6 +823,7 @@
         if (orbitIndex >= 0) orbits.splice(orbitIndex, 1);
       }
     } else if (found.type === "gate") {
+      stopOrbitSamples(found.orbit);
       const gateIndex = found.orbit.gates.indexOf(found.item);
       if (gateIndex >= 0) found.orbit.gates.splice(gateIndex, 1);
     }
@@ -701,21 +831,41 @@
 
   function onPointerDown(event) {
     event.preventDefault();
-    initAudio().then(() => {
+    requestWakeLock();
+    resumeAudio().then(() => {
       state.audioReady = true;
     });
-    const pos = pointerPosition(event);
     canvas.setPointerCapture(event.pointerId);
+    state.pointers.set(event.pointerId, screenPosition(event));
+    if (state.pointers.size === 2) {
+      const points = Array.from(state.pointers.values());
+      state.pinch = {
+        distance: pointerDistance(points[0], points[1]),
+        center: pointerCenter(points[0], points[1]),
+        camera: { ...state.camera }
+      };
+      state.dragging = null;
+      state.drawing = null;
+      return;
+    }
+    if (state.pointers.size > 1) return;
+
+    const pos = pointerPosition(event);
 
     if (state.tool === "mute") {
       const found = nearestObject(pos);
       if (found) {
         found.item.muted = !found.item.muted;
+        if (found.item.muted) {
+          if (found.type === "body") stopBodySample(found.item);
+          if (found.type === "orbit") stopOrbitSamples(found.item);
+          if (found.type === "gate") stopOrbitSamples(found.orbit);
+        }
         if (found.type === "body") {
           state.sampleTarget = found.item;
           updateSampleButton(found.item);
         }
-        trigger("tick", pos.x, pos.y, 0.5, found.type === "body" ? found.item : null);
+        trigger("tick", pos.x, pos.y, 0.5);
       }
       return;
     }
@@ -757,6 +907,16 @@
           state.sampleTarget = found.item;
           updateSampleButton(found.item);
         }
+      } else {
+        const screen = screenPosition(event);
+        state.dragging = {
+          type: "camera",
+          item: state.camera,
+          startX: screen.x,
+          startY: screen.y,
+          cameraX: state.camera.x,
+          cameraY: state.camera.y
+        };
       }
       return;
     }
@@ -767,10 +927,31 @@
   }
 
   function onPointerMove(event) {
+    if (state.pointers.has(event.pointerId)) {
+      state.pointers.set(event.pointerId, screenPosition(event));
+    }
+    if (state.pinch && state.pointers.size >= 2) {
+      const points = Array.from(state.pointers.values()).slice(0, 2);
+      const distance = pointerDistance(points[0], points[1]);
+      const center = pointerCenter(points[0], points[1]);
+      const nextScale = state.pinch.camera.scale * (distance / state.pinch.distance);
+      const worldCenter = {
+        x: (state.pinch.center.x - state.pinch.camera.x) / state.pinch.camera.scale,
+        y: (state.pinch.center.y - state.pinch.camera.y) / state.pinch.camera.scale
+      };
+      state.camera.scale = clamp(nextScale, 0.25, 4);
+      state.camera.x = center.x - worldCenter.x * state.camera.scale;
+      state.camera.y = center.y - worldCenter.y * state.camera.scale;
+      return;
+    }
     const pos = pointerPosition(event);
     if (state.dragging) {
       const item = state.dragging.item;
-      if (state.dragging.type === "gate") {
+      if (state.dragging.type === "camera") {
+        const screen = screenPosition(event);
+        state.camera.x = state.dragging.cameraX + screen.x - state.dragging.startX;
+        state.camera.y = state.dragging.cameraY + screen.y - state.dragging.startY;
+      } else if (state.dragging.type === "gate") {
         item.angle = orbitAngleAtPoint(state.dragging.orbit, pos, performance.now() / 1000);
       } else {
         item.x = pos.x - state.dragging.dx;
@@ -784,7 +965,14 @@
     }
   }
 
-  function onPointerUp() {
+  function onPointerUp(event) {
+    if (event && state.pointers.has(event.pointerId)) {
+      state.pointers.delete(event.pointerId);
+    }
+    if (state.pinch) {
+      if (state.pointers.size < 2) state.pinch = null;
+      return;
+    }
     if (state.dragging) {
       state.dragging = null;
       return;
@@ -831,6 +1019,10 @@
       });
   });
 
+  recordButton.addEventListener("click", () => {
+    if (state.recording) stopRecording();
+    else startRecording();
+  });
   bpmInput.addEventListener("input", () => { state.bpm = Number(bpmInput.value); });
   gravityInput.addEventListener("input", () => { state.gravity = Number(gravityInput.value); });
   chaosInput.addEventListener("input", () => { state.chaos = Number(chaosInput.value); });
@@ -844,6 +1036,24 @@
   canvas.addEventListener("pointermove", onPointerMove, { passive: false });
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const screen = screenPosition(event);
+    if (event.ctrlKey || event.metaKey) {
+      zoomAt(screen, state.camera.scale * Math.exp(-event.deltaY * 0.01));
+    } else {
+      state.camera.x -= event.deltaX;
+      state.camera.y -= event.deltaY;
+    }
+  }, { passive: false });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !state.stopped) {
+      resumeAudio().then(() => {
+        state.audioReady = true;
+      });
+      requestWakeLock();
+    }
+  });
   window.addEventListener("resize", () => {
     resize();
   });
