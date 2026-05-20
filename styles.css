@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
 :root {
   color-scheme: light;
   --bg: #f7f8f6;
@@ -21,12 +23,15 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--ink);
-  font-family: "IBM Plex Sans";
+  font-family: "IBM Plex Sans", sans-serif;
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
+  font-family: inherit;
 }
 
 .instrument {
@@ -35,11 +40,7 @@ input {
   min-height: 100svh;
   touch-action: none;
   user-select: none;
-  background:
-    linear-gradient(rgba(44, 48, 50, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(44, 48, 50, 0.045) 1px, transparent 1px),
-    var(--bg);
-  background-size: 44px 44px;
+  background: var(--bg);
 }
 
 canvas {

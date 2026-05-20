@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#020405">
     <title>Orbital Rhythm Instrument</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=orbitonic-20260520-01">
   </head>
   <body>
     <main class="instrument" aria-label="Orbital rhythm instrument">
@@ -13,7 +13,7 @@
 
       <header class="topbar">
         <div>
-          <h1>ORBITAL PERCUSSION STUDY</h1>
+          <h1>ORBITONIC</h1>
           <p id="readout">silent field</p>
         </div>
         <div class="top-actions">
@@ -44,14 +44,15 @@
           <input id="chaos" type="range" min="0" max="1" step="0.001" value="0">
         </label>
         <div class="actions">
+          <button id="record" type="button">rec</button>
           <button id="stop" type="button">stop</button>
           <button id="clear" type="button">clear</button>
         </div>
       </section>
 
-      <input id="sampleInput" class="hidden-file" type="file" accept="audio/*">
+      <input id="sampleInput" class="hidden-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.ogg">
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=orbitonic-20260520-01"></script>
   </body>
 </html>
