@@ -821,11 +821,24 @@
     const actx = new AudioContext();
     const master = actx.createGain();
     const comp = actx.createDynamicsCompressor();
-    const recorderDestination = actx.createMediaStreamDestination();
+    let recorderDestination = null;
+    if (typeof actx.createMediaStreamDestination === "function") {
+      try {
+        recorderDestination = actx.createMediaStreamDestination();
+      } catch (error) {
+        recorderDestination = null;
+      }
+    }
     master.gain.value = 0.72;
     master.connect(comp);
     comp.connect(actx.destination);
-    comp.connect(recorderDestination);
+    if (recorderDestination) {
+      try {
+        comp.connect(recorderDestination);
+      } catch (error) {
+        recorderDestination = null;
+      }
+    }
     audio = { ctx: actx, master, comp, recorderDestination };
     return actx.resume().then(() => unlockAudio());
   }
@@ -855,16 +868,20 @@
     try {
       return Promise.resolve(resumeAudio())
         .then(() => {
-          state.audioReady = true;
+          state.audioReady = !!audio;
         })
-        .catch(() => {});
+        .catch(() => {
+          state.audioReady = false;
+        });
     } catch (error) {
+      state.audioReady = false;
       return Promise.resolve();
     }
   }
 
   function requestSampleForBody(body) {
     if (!body) return;
+    safeResumeAudio();
     state.sampleTarget = body;
     sampleInput.value = "";
     sampleInput.click();
@@ -875,8 +892,10 @@
     return body.sampleName ? body.sampleName.slice(0, 24) : "choose";
   }
 
-  function updateSampleButton(body, fallback = "sample") {
-    const label = body ? currentBodyLabel(body) : fallback;
+  function updateSampleButton(body, fallback = "") {
+    const label = body
+      ? (body.sampleName ? currentBodyLabel(body) : (fallback || "choose"))
+      : (fallback || "sample");
     if (!sampleButton) return;
     sampleButton.textContent = label;
     sampleButton.title = body && body.sampleName ? body.sampleName : label;
@@ -899,8 +918,44 @@
 
   function decodeAudioData(arrayBuffer) {
     return new Promise((resolve, reject) => {
-      const result = audio.ctx.decodeAudioData(arrayBuffer, resolve, reject);
-      if (result && typeof result.then === "function") result.then(resolve, reject);
+      if (!audio || !audio.ctx) {
+        reject(new Error("AudioContext is not ready"));
+        return;
+      }
+      let settled = false;
+      const done = (buffer) => {
+        if (settled) return;
+        settled = true;
+        resolve(buffer);
+      };
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      try {
+        const copy = arrayBuffer.slice(0);
+        const result = audio.ctx.decodeAudioData(copy, done, fail);
+        if (result && typeof result.then === "function") result.then(done, fail);
+      } catch (error) {
+        fail(error);
+      }
+    });
+  }
+
+  function readSampleFile(file) {
+    if (file && typeof file.arrayBuffer === "function") {
+      return file.arrayBuffer().catch(() => readSampleFileWithReader(file));
+    }
+    return readSampleFileWithReader(file);
+  }
+
+  function readSampleFileWithReader(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Sample file could not be read"));
+      reader.readAsArrayBuffer(file);
     });
   }
 
@@ -1590,10 +1645,12 @@
     const file = sampleInput.files && sampleInput.files[0];
     const target = state.sampleTarget;
     if (!file || !target) return;
+    updateSampleButton(target, "reading");
     initAudio()
-      .then(() => file.arrayBuffer())
+      .then(() => readSampleFile(file))
       .then(decodeAudioData)
       .then((buffer) => {
+        if (!bodies.includes(target)) return;
         state.audioReady = true;
         state.stopped = false;
         stopButton.textContent = "stop";
@@ -1601,7 +1658,7 @@
         assignSampleToBody(target, buffer, file.name);
       })
       .catch(() => {
-        updateSampleButton(state.sampleTarget, "failed");
+        if (state.sampleTarget === target) updateSampleButton(target, "failed");
       });
   });
 
