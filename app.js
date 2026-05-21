@@ -16,6 +16,13 @@
   const toolButtons = Array.from(document.querySelectorAll(".tool"));
 
   const TAU = Math.PI * 2;
+  const PLANET_PALETTE = [
+    { r: 217, g: 187, b: 86 },
+    { r: 244, g: 231, b: 184 },
+    { r: 215, g: 227, b: 219 },
+    { r: 238, g: 203, b: 208 },
+    { r: 218, g: 177, b: 86 }
+  ];
   const state = {
     dpr: 1,
     width: 1,
@@ -193,6 +200,7 @@
         volume: 1,
         pitch: 0,
         activeSample: null,
+        colorTone: rnd(0, 1),
         colorSeed: rnd(0, 1)
       };
       bodies.push(body);
@@ -251,6 +259,24 @@
       .replaceAll('"', "&quot;");
   }
 
+  function paletteColor(value) {
+    const tone = clamp(value, 0, 1) * (PLANET_PALETTE.length - 1);
+    const index = Math.min(PLANET_PALETTE.length - 2, Math.floor(tone));
+    const mix = tone - index;
+    const a = PLANET_PALETTE[index];
+    const b = PLANET_PALETTE[index + 1];
+    return {
+      r: Math.round(a.r + (b.r - a.r) * mix),
+      g: Math.round(a.g + (b.g - a.g) * mix),
+      b: Math.round(a.b + (b.b - a.b) * mix)
+    };
+  }
+
+  function planetColorCss(body, alpha = 1) {
+    const color = paletteColor(body ? body.colorTone : 0.5);
+    return `rgba(${color.r},${color.g},${color.b},${alpha})`;
+  }
+
   function renderPlanetList() {
     if (!planetList) return;
     if (!bodies.length) {
@@ -264,8 +290,9 @@
       const safeName = escapeHtml(name);
       const volume = Math.round(body.volume * 100);
       const pitch = Math.round(body.pitch * 10) / 10;
+      const color = planetColorCss(body, 0.82);
       return `
-        <article class="planet-row${selected}${muted}" data-body-id="${body.id}">
+        <article class="planet-row${selected}${muted}" data-body-id="${body.id}" style="--planet-color: ${color}">
           <div class="planet-main">
             <button type="button" data-action="replace" title="replace sample">◇︎</button>
             <div class="planet-name" title="${safeName}">${safeName}</div>
@@ -281,6 +308,11 @@
             <span>pit</span>
             <input type="range" min="-12" max="12" step="0.1" value="${body.pitch}" data-param="pitch">
             <output>${pitch}</output>
+          </label>
+          <label class="planet-param color-param">
+            <span>col</span>
+            <input type="range" min="0" max="1" step="0.001" value="${body.colorTone}" data-param="color">
+            <output aria-hidden="true"></output>
           </label>
         </article>
       `;
@@ -482,6 +514,16 @@
     return Math.atan2(localY / orbit.sy, localX / (orbit.sx * breathing));
   }
 
+  function hitRadius(size) {
+    return size / Math.max(0.35, state.camera.scale);
+  }
+
+  function orbitEdgeDistance(orbit, point, time) {
+    const angle = orbitAngleAtPoint(orbit, point, time);
+    const edge = gatePosition(orbit, angle, time);
+    return Math.hypot(point.x - edge.x, point.y - edge.y);
+  }
+
   function pointOnOrbit(orbit, angle, time) {
     const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
     const breathing = 1 + groove * state.chaos * 0.07;
@@ -499,6 +541,38 @@
     const localY = Math.sin(angle) * orbit.r * orbit.sy;
     const p = rotatePoint(localX, localY, orbit.tilt + groove * orbit.spin * state.chaos * 0.08);
     return { x: orbit.x + p.x, y: orbit.y + p.y };
+  }
+
+  function gateSegment(orbit, gate, time) {
+    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
+    const breathing = 1 + groove * state.chaos * 0.07;
+    const tilt = orbit.tilt + groove * orbit.spin * state.chaos * 0.08;
+    const gateX = Math.cos(gate.angle) * orbit.r;
+    const gateY = Math.sin(gate.angle) * orbit.r;
+    const tickX = Math.cos(gate.angle) * 13;
+    const tickY = Math.sin(gate.angle) * 13;
+    const a = rotatePoint((gateX - tickX) * orbit.sx * breathing, (gateY - tickY) * orbit.sy, tilt);
+    const b = rotatePoint((gateX + tickX) * orbit.sx * breathing, (gateY + tickY) * orbit.sy, tilt);
+    return {
+      a: { x: orbit.x + a.x, y: orbit.y + a.y },
+      b: { x: orbit.x + b.x, y: orbit.y + b.y }
+    };
+  }
+
+  function segmentDistance(point, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (!lenSq) return Math.hypot(point.x - a.x, point.y - a.y);
+    const t = clamp(((point.x - a.x) * dx + (point.y - a.y) * dy) / lenSq, 0, 1);
+    const x = a.x + dx * t;
+    const y = a.y + dy * t;
+    return Math.hypot(point.x - x, point.y - y);
+  }
+
+  function gateHitDistance(orbit, gate, point, time) {
+    const segment = gateSegment(orbit, gate, time);
+    return segmentDistance(point, segment.a, segment.b);
   }
 
   function initAudio() {
@@ -595,14 +669,12 @@
     const src = audio.ctx.createBufferSource();
     const gain = audio.ctx.createGain();
     const filter = audio.ctx.createBiquadFilter();
-    const speedBend = clamp((1 / body.orbit.beats) * 0.04 + energy * 0.025, 0, 0.12);
-    const curveBend = kind === "snare" ? 0.08 : kind === "clap" ? -0.04 : 0;
-    const baseRate = clamp(1 + speedBend + curveBend + (body.colorSeed - 0.5) * 0.08, 0.25, 4);
+    const playbackRate = clamp(pitchRatio(body), 0.25, 4);
     const levelBase = 0.22 * clamp(energy, 0.35, 1.7);
 
     src.buffer = body.sample;
-    src.playbackRate.value = clamp(baseRate * pitchRatio(body), 0.25, 4);
-    const duration = body.sample.duration / src.playbackRate.value;
+    src.playbackRate.value = playbackRate;
+    const duration = body.sample.duration / playbackRate;
     const fadeStart = Math.max(now + 0.02, now + duration - 0.035);
 
     if (body.activeSample) {
@@ -627,7 +699,7 @@
     filter.connect(gain);
     gain.connect(audio.master);
     const token = uid();
-    body.activeSample = { src, gain, baseRate, levelBase, token };
+    body.activeSample = { src, gain, levelBase, token };
     src.onended = () => {
       if (body.activeSample && body.activeSample.token === token) body.activeSample = null;
     };
@@ -725,6 +797,7 @@
     if (!audio || !state.audioReady || state.muted) return;
     const e = clamp(energy, 0.35, 1.4);
     if (playSample(body, e, x, y, kind)) return;
+    if (body && !body.sample) return;
     if (kind === "kick") kick(e);
     else if (kind === "snare") snare(e);
     else if (kind === "hat") hat(e);
@@ -844,21 +917,21 @@
       ctx.beginPath();
       ctx.moveTo(body.px, body.py);
       ctx.lineTo(body.x, body.y);
-      ctx.strokeStyle = body.sample ? "rgba(44,48,50,0.88)" : "rgba(44,48,50,0.78)";
+      ctx.strokeStyle = body.sample ? planetColorCss(body, 0.72) : "rgba(44,48,50,0.58)";
       ctx.lineWidth = 1;
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(body.x, body.y, body.size + 1, 0, TAU);
       ctx.fillStyle = body.muted || body.orbit.muted
-        ? "rgba(44,48,50,0.24)"
+        ? planetColorCss(body, 0.22)
         : body.sample
-          ? "rgba(44,48,50,0.9)"
-          : "rgba(44,48,50,0.82)";
+          ? planetColorCss(body, 0.96)
+          : planetColorCss(body, 0.72);
       ctx.fill();
       if (body.sample) {
         ctx.beginPath();
         ctx.arc(body.x, body.y, body.size + 7, 0, TAU);
-        ctx.strokeStyle = "rgba(44,48,50,0.62)";
+        ctx.strokeStyle = planetColorCss(body, 0.48);
         ctx.stroke();
       }
     }
@@ -914,8 +987,17 @@
 
   function nearestObject(pos) {
     let best = null;
-    let bestD = 28;
+    let bestD = hitRadius(30);
     const time = performance.now() / 1000;
+    for (const orbit of orbits) {
+      for (const gate of orbit.gates) {
+        const d = gateHitDistance(orbit, gate, pos, time);
+        if (d < bestD) {
+          best = { type: "gate", item: gate, orbit };
+          bestD = d;
+        }
+      }
+    }
     for (const body of bodies) {
       const d = Math.hypot(pos.x - body.x, pos.y - body.y);
       if (d < bestD) {
@@ -924,17 +1006,7 @@
       }
     }
     for (const orbit of orbits) {
-      for (const gate of orbit.gates) {
-        const p = gatePosition(orbit, gate.angle, time);
-        const d = Math.hypot(pos.x - p.x, pos.y - p.y);
-        if (d < bestD) {
-          best = { type: "gate", item: gate, orbit };
-          bestD = d;
-        }
-      }
-    }
-    for (const orbit of orbits) {
-      const d = Math.abs(Math.hypot(pos.x - orbit.x, pos.y - orbit.y) - orbit.r);
+      const d = orbitEdgeDistance(orbit, pos, time);
       if (d < bestD) {
         best = { type: "orbit", item: orbit };
         bestD = d;
@@ -945,9 +1017,10 @@
 
   function nearestOrbit(pos) {
     let best = null;
-    let bestD = 34;
+    let bestD = hitRadius(42);
+    const time = performance.now() / 1000;
     for (const orbit of orbits) {
-      const d = Math.abs(Math.hypot(pos.x - orbit.x, pos.y - orbit.y) - orbit.r);
+      const d = orbitEdgeDistance(orbit, pos, time);
       if (d < bestD) {
         best = orbit;
         bestD = d;
@@ -958,12 +1031,11 @@
 
   function nearestDeletable(pos) {
     let best = null;
-    let bestD = 20;
+    let bestD = hitRadius(28);
     const time = performance.now() / 1000;
     for (const orbit of orbits) {
       for (const gate of orbit.gates) {
-        const p = gatePosition(orbit, gate.angle, time);
-        const d = Math.hypot(pos.x - p.x, pos.y - p.y);
+        const d = gateHitDistance(orbit, gate, pos, time);
         if (d < bestD) {
           best = { type: "gate", item: gate, orbit };
           bestD = d;
@@ -972,7 +1044,7 @@
     }
     for (const body of bodies) {
       const d = Math.hypot(pos.x - body.x, pos.y - body.y);
-      if (d < bestD) {
+      if (d < Math.min(bestD, hitRadius(24))) {
         best = { type: "body", item: body };
         bestD = d;
       }
@@ -1256,14 +1328,20 @@
     if (event.target.dataset.param === "pitch") {
       body.pitch = value;
       if (body.activeSample && body.activeSample.src) {
-        body.activeSample.src.playbackRate.setValueAtTime(clamp(body.activeSample.baseRate * pitchRatio(body), 0.25, 4), audio.ctx.currentTime);
+        body.activeSample.src.playbackRate.setValueAtTime(clamp(pitchRatio(body), 0.25, 4), audio.ctx.currentTime);
       }
+    }
+    if (event.target.dataset.param === "color") {
+      body.colorTone = value;
+      row.style.setProperty("--planet-color", planetColorCss(body, 0.82));
     }
     const output = event.target.parentElement.querySelector("output");
     if (output) {
-      output.textContent = event.target.dataset.param === "volume"
-        ? String(Math.round(body.volume * 100))
-        : String(Math.round(body.pitch * 10) / 10);
+      if (event.target.dataset.param === "volume") {
+        output.textContent = String(Math.round(body.volume * 100));
+      } else if (event.target.dataset.param === "pitch") {
+        output.textContent = String(Math.round(body.pitch * 10) / 10);
+      }
     }
   });
 
