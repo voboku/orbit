@@ -171,7 +171,7 @@ button.active {
 .planet-list {
   display: grid;
   gap: 8px;
-  max-height: 354px;
+  max-height: 430px;
   overflow: auto;
   padding-right: 4px;
   pointer-events: auto;
@@ -265,6 +265,43 @@ button.active {
 .planet-param output {
   text-align: right;
   color: rgba(44, 48, 50, 0.34);
+}
+
+.waveform {
+  width: 100%;
+  height: 28px;
+  display: block;
+  border: 1px solid rgba(44, 48, 50, 0.07);
+  border-radius: 6px;
+  background: rgba(247, 248, 246, 0.42);
+}
+
+.waveform polygon {
+  fill: rgba(44, 48, 50, 0.18);
+}
+
+.waveform .slice-range {
+  fill: rgba(217, 187, 86, 0.12);
+}
+
+.waveform line {
+  stroke: rgba(44, 48, 50, 0.42);
+  stroke-width: 0.75;
+  vector-effect: non-scaling-stroke;
+}
+
+.waveform .slice-in {
+  stroke: rgba(44, 48, 50, 0.28);
+}
+
+.waveform .slice-out {
+  stroke: rgba(44, 48, 50, 0.5);
+}
+
+.waveform.empty {
+  height: 10px;
+  border-style: dashed;
+  opacity: 0.42;
 }
 
 .color-param input[type="range"] {

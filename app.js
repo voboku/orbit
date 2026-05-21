@@ -5,6 +5,8 @@
   const bpmInput = document.getElementById("bpm");
   const gravityInput = document.getElementById("gravity");
   const chaosInput = document.getElementById("chaos");
+  const undoButton = document.getElementById("undo");
+  const velocityToggle = document.getElementById("velocityToggle");
   const recordButton = document.getElementById("record");
   const stopButton = document.getElementById("stop");
   const clearButton = document.getElementById("clear");
@@ -16,6 +18,11 @@
   const toolButtons = Array.from(document.querySelectorAll(".tool"));
 
   const TAU = Math.PI * 2;
+  const HISTORY_LIMIT = 32;
+  const GATE_MIN_VELOCITY = 0.25;
+  const GATE_MAX_VELOCITY = 1.4;
+  const GATE_BASE_REACH = 13;
+  const GATE_MAX_REACH = 34;
   const PLANET_PALETTE = [
     { r: 217, g: 187, b: 86 },
     { r: 244, g: 231, b: 184 },
@@ -36,12 +43,15 @@
     audioReady: false,
     stopped: false,
     muted: false,
+    velocityEnabled: false,
     camera: { x: 0, y: 0, scale: 1 },
     pointers: new Map(),
     pinch: null,
     dragging: null,
     drawing: null,
     sampleTarget: null,
+    history: [],
+    activeParamEdit: "",
     recorderNode: null,
     recorderSilent: null,
     recordedChunks: [],
@@ -104,6 +114,55 @@
 
   function orbitGroove(orbit, time) {
     return grooveWave(time, orbit.groovePhase, orbit.grooveRate, orbit.grooveSkew);
+  }
+
+  function makeChaosProfile(segments = 8) {
+    const weights = [];
+    for (let i = 0; i < segments; i += 1) {
+      let weight = rnd(0.26, 1.85);
+      if (Math.random() < 0.24) weight *= rnd(0.22, 0.58);
+      if (Math.random() < 0.2) weight *= rnd(1.65, 2.8);
+      weights.push(clamp(weight, 0.08, 3.2));
+    }
+    const total = weights.reduce((sum, value) => sum + value, 0) || 1;
+    const points = [0];
+    let cursor = 0;
+    for (const weight of weights) {
+      cursor += weight / total;
+      points.push(cursor);
+    }
+    points[points.length - 1] = 1;
+    return points;
+  }
+
+  function ensureChaosProfile(body, lap) {
+    const segments = body.chaosSegments || 8;
+    if (!body.chaosProfile || body.chaosProfile.length !== segments + 1 || body.chaosLap !== lap) {
+      body.chaosProfile = makeChaosProfile(segments);
+      body.chaosLap = lap;
+    }
+    return body.chaosProfile;
+  }
+
+  function chaosWarpPhase(phase, body, lap) {
+    const amount = clamp(state.chaos, 0, 1);
+    if (!amount) return phase;
+    const segments = body.chaosSegments || 8;
+    const profile = ensureChaosProfile(body, lap);
+    const scaled = phase * segments;
+    const index = Math.min(segments - 1, Math.floor(scaled));
+    const local = scaled - index;
+    const ease = local * local * (3 - local * 2);
+    const start = profile[index];
+    const end = profile[index + 1];
+    const warped = start + (end - start) * ease;
+    return phase + (warped - phase) * amount;
+  }
+
+  function chaosWarpAngle(rawAngle, body) {
+    const turns = Math.floor(rawAngle / TAU);
+    const phase = wrapAngle(rawAngle) / TAU;
+    return (turns + chaosWarpPhase(phase, body, turns)) * TAU;
   }
 
   function pick(values) {
@@ -180,10 +239,12 @@
     let firstBody = null;
     for (let i = 0; i < count; i += 1) {
       const direction = Math.random() > 0.5 ? 1 : -1;
+      const initialAngle = rnd(0, TAU);
       const body = {
         orbit,
         id: uid(),
-        angle: rnd(0, TAU),
+        angle: initialAngle,
+        rawAngle: initialAngle,
         direction,
         speed: direction,
         mass: rnd(0.7, 1.5),
@@ -194,11 +255,16 @@
         py: y,
         lastTrigger: 0,
         lastLoopTrigger: 0,
+        chaosSegments: pick([5, 7, 9, 11]),
+        chaosLap: null,
+        chaosProfile: null,
         muted: false,
         sample: null,
         sampleName: "",
         volume: 1,
         pitch: 0,
+        sliceStart: 0,
+        sliceEnd: 1,
         activeSample: null,
         colorTone: rnd(0, 1),
         colorSeed: rnd(0, 1)
@@ -210,7 +276,110 @@
     return { orbit, body: firstBody };
   }
 
-  function resetField() {
+  function snapshotField() {
+    return {
+      sampleTargetId: state.sampleTarget ? state.sampleTarget.id : "",
+      orbits: orbits.map((orbit) => ({
+        id: orbit.id,
+        x: orbit.x,
+        y: orbit.y,
+        r: orbit.r,
+        sx: orbit.sx,
+        sy: orbit.sy,
+        tilt: orbit.tilt,
+        spin: orbit.spin,
+        wobble: orbit.wobble,
+        phase: orbit.phase,
+        groovePhase: orbit.groovePhase,
+        grooveRate: orbit.grooveRate,
+        grooveDepth: orbit.grooveDepth,
+        grooveSkew: orbit.grooveSkew,
+        shapeDrift: orbit.shapeDrift,
+        gates: orbit.gates.map((gate) => ({ ...gate })),
+        beats: orbit.beats,
+        muted: orbit.muted
+      })),
+      bodies: bodies.map((body) => ({
+        id: body.id,
+        orbitId: body.orbit.id,
+        angle: body.angle,
+        rawAngle: Number.isFinite(body.rawAngle) ? body.rawAngle : body.angle,
+        direction: body.direction,
+        speed: body.speed,
+        mass: body.mass,
+        size: body.size,
+        x: body.x,
+        y: body.y,
+        px: body.px,
+        py: body.py,
+        lastTrigger: body.lastTrigger,
+        lastLoopTrigger: body.lastLoopTrigger,
+        chaosSegments: body.chaosSegments,
+        chaosLap: body.chaosLap,
+        chaosProfile: body.chaosProfile ? body.chaosProfile.slice() : null,
+        muted: body.muted,
+        sample: body.sample,
+        sampleName: body.sampleName,
+        volume: body.volume,
+        pitch: body.pitch,
+        sliceStart: body.sliceStart,
+        sliceEnd: body.sliceEnd,
+        colorTone: body.colorTone,
+        colorSeed: body.colorSeed
+      }))
+    };
+  }
+
+  function pushHistory() {
+    state.history.push(snapshotField());
+    if (state.history.length > HISTORY_LIMIT) state.history.shift();
+  }
+
+  function restoreSnapshot(snapshot) {
+    if (!snapshot) return;
+    stopActiveSamples();
+    const orbitMap = new Map();
+    orbits.length = 0;
+    bodies.length = 0;
+    for (const savedOrbit of snapshot.orbits) {
+      const orbit = {
+        ...savedOrbit,
+        gates: savedOrbit.gates.map((gate) => ({ ...gate }))
+      };
+      orbitMap.set(orbit.id, orbit);
+      orbits.push(orbit);
+    }
+    for (const savedBody of snapshot.bodies) {
+      const orbit = orbitMap.get(savedBody.orbitId);
+      if (!orbit) continue;
+      const body = {
+        ...savedBody,
+        orbit,
+        chaosSegments: savedBody.chaosSegments || pick([5, 7, 9, 11]),
+        chaosLap: Number.isFinite(savedBody.chaosLap) ? savedBody.chaosLap : null,
+        chaosProfile: savedBody.chaosProfile ? savedBody.chaosProfile.slice() : null,
+        activeSample: null
+      };
+      delete body.orbitId;
+      bodies.push(body);
+    }
+    state.sampleTarget = bodies.find((body) => body.id === snapshot.sampleTargetId) || null;
+    state.dragging = null;
+    state.drawing = null;
+    state.pinch = null;
+    state.pointers.clear();
+    updateSampleButton(state.sampleTarget);
+    renderPlanetList();
+  }
+
+  function undoLast() {
+    const snapshot = state.history.pop();
+    if (!snapshot) return;
+    restoreSnapshot(snapshot);
+  }
+
+  function resetField(remember = false) {
+    if (remember) pushHistory();
     stopActiveSamples();
     orbits.length = 0;
     bodies.length = 0;
@@ -222,7 +391,11 @@
   function stopBodySample(body) {
     if (!body || !body.activeSample) return;
     try {
-      body.activeSample.src.stop();
+      if (body.activeSample.sources) {
+        for (const source of body.activeSample.sources) source.stop();
+      } else if (body.activeSample.src) {
+        body.activeSample.src.stop();
+      }
     } catch (error) {
       // The source may already be stopped.
     }
@@ -277,6 +450,46 @@
     return `rgba(${color.r},${color.g},${color.b},${alpha})`;
   }
 
+  function sampleSlice(body) {
+    const start = clamp(body && Number.isFinite(body.sliceStart) ? body.sliceStart : 0, 0, 0.98);
+    const end = clamp(body && Number.isFinite(body.sliceEnd) ? body.sliceEnd : 1, start + 0.02, 1);
+    return { start, end };
+  }
+
+  function waveformSvg(body) {
+    if (!body || !body.sample) return '<div class="waveform empty"></div>';
+    const data = body.sample.getChannelData(0);
+    const bars = 52;
+    const step = Math.max(1, Math.floor(data.length / bars));
+    const points = [];
+    for (let i = 0; i < bars; i += 1) {
+      let peak = 0;
+      const start = i * step;
+      const end = Math.min(data.length, start + step);
+      for (let j = start; j < end; j += 1) peak = Math.max(peak, Math.abs(data[j]));
+      const x = (i / (bars - 1)) * 100;
+      const y = 50 - peak * 42;
+      points.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    }
+    for (let i = bars - 1; i >= 0; i -= 1) {
+      const peak = Math.abs(50 - Number(points[i].split(",")[1])) / 42;
+      const x = (i / (bars - 1)) * 100;
+      const y = 50 + peak * 42;
+      points.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    }
+    const slice = sampleSlice(body);
+    const inX = slice.start * 100;
+    const outX = slice.end * 100;
+    return `
+      <svg class="waveform" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+        <rect class="slice-range" x="${inX}" y="1.5" width="${Math.max(0.5, outX - inX)}" height="25"></rect>
+        <polygon points="${points.join(" ")}"></polygon>
+        <line class="slice-in" x1="${inX}" y1="2" x2="${inX}" y2="26"></line>
+        <line class="slice-out" x1="${outX}" y1="2" x2="${outX}" y2="26"></line>
+      </svg>
+    `;
+  }
+
   function renderPlanetList() {
     if (!planetList) return;
     if (!bodies.length) {
@@ -290,6 +503,9 @@
       const safeName = escapeHtml(name);
       const volume = Math.round(body.volume * 100);
       const pitch = Math.round(body.pitch * 10) / 10;
+      const slice = sampleSlice(body);
+      const sliceStart = Math.round(slice.start * 100);
+      const sliceEnd = Math.round(slice.end * 100);
       const color = planetColorCss(body, 0.82);
       return `
         <article class="planet-row${selected}${muted}" data-body-id="${body.id}" style="--planet-color: ${color}">
@@ -299,6 +515,7 @@
             <button type="button" data-action="mute" title="mute">${body.muted ? "○︎" : "◐︎"}</button>
             <button type="button" data-action="delete" title="delete">×︎</button>
           </div>
+          ${waveformSvg(body)}
           <label class="planet-param">
             <span>vol</span>
             <input type="range" min="0" max="1.5" step="0.01" value="${body.volume}" data-param="volume">
@@ -313,6 +530,16 @@
             <span>col</span>
             <input type="range" min="0" max="1" step="0.001" value="${body.colorTone}" data-param="color">
             <output aria-hidden="true"></output>
+          </label>
+          <label class="planet-param">
+            <span>in</span>
+            <input type="range" min="0" max="0.98" step="0.001" value="${slice.start}" data-param="sliceStart">
+            <output>${sliceStart}</output>
+          </label>
+          <label class="planet-param">
+            <span>out</span>
+            <input type="range" min="0.02" max="1" step="0.001" value="${slice.end}" data-param="sliceEnd">
+            <output>${sliceEnd}</output>
           </label>
         </article>
       `;
@@ -502,15 +729,14 @@
   }
 
   function orbitAngleAtPoint(orbit, point, time) {
-    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
-    const tilt = orbit.tilt + groove * orbit.spin * state.chaos * 0.08;
+    const tilt = orbit.tilt;
     const c = Math.cos(-tilt);
     const s = Math.sin(-tilt);
     const dx = point.x - orbit.x;
     const dy = point.y - orbit.y;
     const localX = dx * c - dy * s;
     const localY = dx * s + dy * c;
-    const breathing = 1 + groove * state.chaos * 0.07;
+    const breathing = 1;
     return Math.atan2(localY / orbit.sy, localX / (orbit.sx * breathing));
   }
 
@@ -525,32 +751,45 @@
   }
 
   function pointOnOrbit(orbit, angle, time) {
-    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
-    const breathing = 1 + groove * state.chaos * 0.07;
-    const shape = 1 + Math.sin(angle * 3 + beatClock(time) * TAU * orbit.shapeDrift + orbit.phase) * state.chaos * 0.08 * orbit.grooveDepth;
+    const breathing = 1;
+    const shape = 1;
     const localX = Math.cos(angle) * orbit.r * orbit.sx * breathing;
     const localY = Math.sin(angle) * orbit.r * orbit.sy * shape;
-    const p = rotatePoint(localX, localY, orbit.tilt + groove * orbit.spin * state.chaos * 0.08);
+    const p = rotatePoint(localX, localY, orbit.tilt);
     return { x: orbit.x + p.x, y: orbit.y + p.y };
   }
 
   function gatePosition(orbit, angle, time) {
-    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
-    const breathing = 1 + groove * state.chaos * 0.07;
+    const breathing = 1;
     const localX = Math.cos(angle) * orbit.r * orbit.sx * breathing;
     const localY = Math.sin(angle) * orbit.r * orbit.sy;
-    const p = rotatePoint(localX, localY, orbit.tilt + groove * orbit.spin * state.chaos * 0.08);
+    const p = rotatePoint(localX, localY, orbit.tilt);
     return { x: orbit.x + p.x, y: orbit.y + p.y };
   }
 
+  function gateVelocity(gate) {
+    return clamp(gate && Number.isFinite(gate.velocity) ? gate.velocity : 1, GATE_MIN_VELOCITY, GATE_MAX_VELOCITY);
+  }
+
+  function gateReach(gate) {
+    if (!state.velocityEnabled) return GATE_BASE_REACH;
+    const normalized = (gateVelocity(gate) - GATE_MIN_VELOCITY) / (GATE_MAX_VELOCITY - GATE_MIN_VELOCITY);
+    return GATE_BASE_REACH + normalized * (GATE_MAX_REACH - GATE_BASE_REACH);
+  }
+
+  function gateVelocityFromDistance(distance) {
+    const normalized = clamp(distance / 82, 0, 1);
+    return GATE_MIN_VELOCITY + normalized * (GATE_MAX_VELOCITY - GATE_MIN_VELOCITY);
+  }
+
   function gateSegment(orbit, gate, time) {
-    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
-    const breathing = 1 + groove * state.chaos * 0.07;
-    const tilt = orbit.tilt + groove * orbit.spin * state.chaos * 0.08;
+    const breathing = 1;
+    const tilt = orbit.tilt;
     const gateX = Math.cos(gate.angle) * orbit.r;
     const gateY = Math.sin(gate.angle) * orbit.r;
-    const tickX = Math.cos(gate.angle) * 13;
-    const tickY = Math.sin(gate.angle) * 13;
+    const reach = gateReach(gate);
+    const tickX = Math.cos(gate.angle) * reach;
+    const tickY = Math.sin(gate.angle) * reach;
     const a = rotatePoint((gateX - tickX) * orbit.sx * breathing, (gateY - tickY) * orbit.sy, tilt);
     const b = rotatePoint((gateX + tickX) * orbit.sx * breathing, (gateY + tickY) * orbit.sy, tilt);
     return {
@@ -651,6 +890,8 @@
     stopBodySample(body);
     body.sample = buffer;
     body.sampleName = name.replace(/\.[^/.]+$/, "");
+    body.sliceStart = Number.isFinite(body.sliceStart) ? body.sliceStart : 0;
+    body.sliceEnd = Number.isFinite(body.sliceEnd) ? body.sliceEnd : 1;
     updateSampleButton(body);
     renderPlanetList();
     trigger("sample", body.x, body.y, 0.8, body);
@@ -674,7 +915,10 @@
 
     src.buffer = body.sample;
     src.playbackRate.value = playbackRate;
-    const duration = body.sample.duration / playbackRate;
+    const slice = sampleSlice(body);
+    const sampleOffset = body.sample.duration * slice.start;
+    const sampleDuration = body.sample.duration * (slice.end - slice.start);
+    const duration = sampleDuration / playbackRate;
     const fadeStart = Math.max(now + 0.02, now + duration - 0.035);
 
     if (body.activeSample) {
@@ -688,7 +932,7 @@
 
     filter.type = "lowpass";
     filter.frequency.value = clamp(900 + (1 - y / state.height) * 7600 + energy * 1500, 700, 12000);
-    filter.Q.value = 0.25 + state.chaos * 3.5;
+    filter.Q.value = 0.25;
     gain.gain.setValueAtTime(0.0001, now);
     const level = levelBase * body.volume;
     gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level), now + 0.004);
@@ -703,7 +947,7 @@
     src.onended = () => {
       if (body.activeSample && body.activeSample.token === token) body.activeSample = null;
     };
-    src.start(now);
+    src.start(now, sampleOffset, sampleDuration);
     src.stop(now + duration + 0.04);
     return true;
   }
@@ -822,7 +1066,7 @@
       const pull = state.gravity * 0.16;
       orbit.x += (state.cx - orbit.x) * pull * dt * 0.04;
       orbit.y += (state.cy - orbit.y) * pull * dt * 0.04;
-      orbit.tilt += orbit.spin * dt * 0.012 * (0.25 + state.chaos);
+      orbit.tilt += orbit.spin * dt * 0.003;
     }
 
     for (const body of bodies) {
@@ -830,11 +1074,11 @@
       body.py = body.y;
       const previousAngle = body.angle;
       const secondsPerLap = (60 / state.bpm) * body.orbit.beats;
-      const baseMotion = (TAU / secondsPerLap) * body.direction;
-      const groove = orbitGroove(body.orbit, time) * body.orbit.grooveDepth;
-      const bodyLag = Math.sin((beatClock(time) * body.orbit.grooveRate * 0.5 + body.colorSeed) * TAU) * 0.06;
-      const motion = baseMotion * (1 + state.chaos * (groove * 0.26 + bodyLag));
-      body.angle += motion * dt;
+      const rawMotion = (TAU / secondsPerLap) * body.direction;
+      body.rawAngle = Number.isFinite(body.rawAngle) ? body.rawAngle : body.angle;
+      body.rawAngle += rawMotion * dt;
+      body.angle = chaosWarpAngle(body.rawAngle, body);
+      const motion = body.angle - previousAngle;
       const p = pointOnOrbit(body.orbit, body.angle, time);
       body.x = p.x;
       body.y = p.y;
@@ -843,11 +1087,12 @@
         for (const gate of body.orbit.gates) {
           if (
             !gate.muted &&
-            crossedAngle(previousAngle, body.angle, gate.angle, motion) &&
+            crossedAngle(previousAngle, body.angle, gate.angle, rawMotion) &&
             now - body.lastLoopTrigger > 0.12
           ) {
             body.lastLoopTrigger = now;
-            trigger("kick", body.x, body.y, 0.74 + body.mass * 0.18, body);
+            const gateEnergy = state.velocityEnabled ? gateVelocity(gate) : 1;
+            trigger("kick", body.x, body.y, (0.74 + body.mass * 0.18) * gateEnergy, body);
           }
         }
       }
@@ -880,10 +1125,8 @@
   function drawEllipse(orbit, time) {
     ctx.save();
     ctx.translate(orbit.x, orbit.y);
-    const groove = orbitGroove(orbit, time) * orbit.grooveDepth;
-    ctx.rotate(orbit.tilt + groove * orbit.spin * state.chaos * 0.08);
-    const breathing = 1 + groove * state.chaos * 0.07;
-    ctx.scale(orbit.sx * breathing, orbit.sy);
+    ctx.rotate(orbit.tilt);
+    ctx.scale(orbit.sx, orbit.sy);
     ctx.beginPath();
     ctx.ellipse(0, 0, orbit.r, orbit.r, 0, 0, TAU);
     ctx.strokeStyle = orbit.muted ? "rgba(44,48,50,0.18)" : "rgba(44,48,50,0.88)";
@@ -892,12 +1135,14 @@
     for (const gate of orbit.gates) {
       const gateX = Math.cos(gate.angle) * orbit.r;
       const gateY = Math.sin(gate.angle) * orbit.r;
-      const tickX = Math.cos(gate.angle) * 13;
-      const tickY = Math.sin(gate.angle) * 13;
+      const reach = gateReach(gate);
+      const tickX = Math.cos(gate.angle) * reach;
+      const tickY = Math.sin(gate.angle) * reach;
       ctx.beginPath();
       ctx.moveTo(gateX - tickX, gateY - tickY);
       ctx.lineTo(gateX + tickX, gateY + tickY);
-      ctx.strokeStyle = orbit.muted || gate.muted ? "rgba(44,48,50,0.2)" : "rgba(44,48,50,0.9)";
+      const alpha = state.velocityEnabled ? 0.32 + (gateVelocity(gate) / GATE_MAX_VELOCITY) * 0.54 : 0.9;
+      ctx.strokeStyle = orbit.muted || gate.muted ? "rgba(44,48,50,0.2)" : `rgba(44,48,50,${alpha})`;
       ctx.stroke();
     }
     ctx.restore();
@@ -960,6 +1205,10 @@
       ctx.beginPath();
       if (state.drawing.kind === "planet") {
         ctx.arc(state.drawing.x, state.drawing.y, state.drawing.r, 0, TAU);
+      } else if (state.drawing.kind === "gate") {
+        const segment = gateSegment(state.drawing.orbit, state.drawing, time);
+        ctx.moveTo(segment.a.x, segment.a.y);
+        ctx.lineTo(segment.b.x, segment.b.y);
       }
       ctx.strokeStyle = "rgba(44,48,50,0.44)";
       ctx.setLineDash([4, 6]);
@@ -1060,6 +1309,42 @@
     return { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
   }
 
+  function beginPinch(points) {
+    state.pinch = {
+      distance: pointerDistance(points[0], points[1]),
+      center: pointerCenter(points[0], points[1]),
+      camera: { ...state.camera }
+    };
+    state.dragging = null;
+    state.drawing = null;
+  }
+
+  function updatePinch(points) {
+    if (!state.pinch) return;
+    const distance = pointerDistance(points[0], points[1]);
+    const center = pointerCenter(points[0], points[1]);
+    const nextScale = state.pinch.camera.scale * (distance / state.pinch.distance);
+    const worldCenter = {
+      x: (state.pinch.center.x - state.pinch.camera.x) / state.pinch.camera.scale,
+      y: (state.pinch.center.y - state.pinch.camera.y) / state.pinch.camera.scale
+    };
+    state.camera.scale = clamp(nextScale, 0.25, 4);
+    state.camera.x = center.x - worldCenter.x * state.camera.scale;
+    state.camera.y = center.y - worldCenter.y * state.camera.scale;
+  }
+
+  function touchPosition(touch) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: touch.clientX - rect.left,
+      y: touch.clientY - rect.top
+    };
+  }
+
+  function touchPoints(event) {
+    return Array.from(event.touches).slice(0, 2).map(touchPosition);
+  }
+
   function removeObject(found) {
     if (!found) return;
     if (found.type === "body") {
@@ -1095,14 +1380,7 @@
     } catch (error) {}
     state.pointers.set(event.pointerId, screenPosition(event));
     if (state.pointers.size === 2) {
-      const points = Array.from(state.pointers.values());
-      state.pinch = {
-        distance: pointerDistance(points[0], points[1]),
-        center: pointerCenter(points[0], points[1]),
-        camera: { ...state.camera }
-      };
-      state.dragging = null;
-      state.drawing = null;
+      beginPinch(Array.from(state.pointers.values()));
       return;
     }
     if (state.pointers.size > 1) return;
@@ -1112,6 +1390,7 @@
     if (state.tool === "mute") {
       const found = nearestObject(pos);
       if (found) {
+        pushHistory();
         found.item.muted = !found.item.muted;
         if (found.item.muted) {
           if (found.type === "body") stopBodySample(found.item);
@@ -1131,6 +1410,7 @@
     if (state.tool === "delete") {
       const found = nearestDeletable(pos);
       if (found) {
+        pushHistory();
         removeObject(found);
       }
       return;
@@ -1145,12 +1425,15 @@
     if (state.tool === "gate") {
       const orbit = nearestOrbit(pos);
       if (orbit) {
-        orbit.gates.push({
-          id: uid(),
-          angle: orbitAngleAtPoint(orbit, pos, performance.now() / 1000),
-          muted: false
-        });
-        state.pulse.push({ x: pos.x, y: pos.y, r: 6, life: 1, kind: "sample" });
+        const angle = orbitAngleAtPoint(orbit, pos, performance.now() / 1000);
+        if (state.velocityEnabled) {
+          state.drawing = { kind: "gate", orbit, startX: pos.x, startY: pos.y, angle, velocity: 1 };
+        } else {
+          pushHistory();
+          orbit.gates.push({ id: uid(), angle, muted: false });
+          const p = gatePosition(orbit, angle, performance.now() / 1000);
+          state.pulse.push({ x: p.x, y: p.y, r: 6, life: 1, kind: "sample" });
+        }
       }
       return;
     }
@@ -1158,6 +1441,7 @@
     if (state.tool === "move") {
       const found = nearestObject(pos);
       if (found) {
+        pushHistory();
         state.dragging = found.type === "gate"
           ? { ...found }
           : { ...found, dx: pos.x - found.item.x, dy: pos.y - found.item.y };
@@ -1190,17 +1474,7 @@
       state.pointers.set(event.pointerId, screenPosition(event));
     }
     if (state.pinch && state.pointers.size >= 2) {
-      const points = Array.from(state.pointers.values()).slice(0, 2);
-      const distance = pointerDistance(points[0], points[1]);
-      const center = pointerCenter(points[0], points[1]);
-      const nextScale = state.pinch.camera.scale * (distance / state.pinch.distance);
-      const worldCenter = {
-        x: (state.pinch.center.x - state.pinch.camera.x) / state.pinch.camera.scale,
-        y: (state.pinch.center.y - state.pinch.camera.y) / state.pinch.camera.scale
-      };
-      state.camera.scale = clamp(nextScale, 0.25, 4);
-      state.camera.x = center.x - worldCenter.x * state.camera.scale;
-      state.camera.y = center.y - worldCenter.y * state.camera.scale;
+      updatePinch(Array.from(state.pointers.values()).slice(0, 2));
       return;
     }
     const pos = pointerPosition(event);
@@ -1221,6 +1495,9 @@
     if (!state.drawing) return;
     if (state.drawing.kind === "planet") {
       state.drawing.r = Math.hypot(pos.x - state.drawing.x, pos.y - state.drawing.y);
+    } else if (state.drawing.kind === "gate") {
+      state.drawing.angle = orbitAngleAtPoint(state.drawing.orbit, pos, performance.now() / 1000);
+      state.drawing.velocity = gateVelocityFromDistance(Math.hypot(pos.x - state.drawing.startX, pos.y - state.drawing.startY));
     }
   }
 
@@ -1238,13 +1515,49 @@
     }
     if (!state.drawing) return;
     if (state.drawing.kind === "planet" && state.drawing.r > 3) {
+      pushHistory();
       const created = makeOrbit(state.drawing.x, state.drawing.y, state.drawing.r);
       state.sampleTarget = created.body;
       updateSampleButton(created.body);
       renderPlanetList();
       requestSampleForBody(created.body);
+    } else if (state.drawing.kind === "gate") {
+      pushHistory();
+      state.drawing.orbit.gates.push({
+        id: uid(),
+        angle: state.drawing.angle,
+        velocity: state.drawing.velocity,
+        muted: false
+      });
+      const p = gatePosition(state.drawing.orbit, state.drawing.angle, performance.now() / 1000);
+      state.pulse.push({ x: p.x, y: p.y, r: 6, life: 1, kind: "sample" });
     }
     state.drawing = null;
+  }
+
+  function onTouchStart(event) {
+    if (event.touches.length < 2) return;
+    event.preventDefault();
+    requestWakeLock();
+    safeResumeAudio();
+    state.pointers.clear();
+    beginPinch(touchPoints(event));
+  }
+
+  function onTouchMove(event) {
+    if (event.touches.length < 2 || !state.pinch) return;
+    event.preventDefault();
+    updatePinch(touchPoints(event));
+  }
+
+  function onTouchEnd(event) {
+    if (event.touches.length >= 2) {
+      beginPinch(touchPoints(event));
+      return;
+    }
+    if (state.pinch) event.preventDefault();
+    state.pinch = null;
+    state.pointers.clear();
   }
 
   toolButtons.forEach((button) => {
@@ -1284,6 +1597,7 @@
         state.audioReady = true;
         state.stopped = false;
         stopButton.textContent = "stop";
+        pushHistory();
         assignSampleToBody(target, buffer, file.name);
       })
       .catch(() => {
@@ -1299,12 +1613,14 @@
     if (!body) return;
     const action = event.target.dataset.action || "focus";
     if (action === "delete") {
+      pushHistory();
       removeObject({ type: "body", item: body });
       return;
     }
     state.sampleTarget = body;
     updateSampleButton(body);
     if (action === "mute") {
+      pushHistory();
       body.muted = !body.muted;
       if (body.muted) stopBodySample(body);
     } else if (action === "replace") {
@@ -1319,6 +1635,11 @@
     const body = findBodyById(row.dataset.bodyId);
     if (!body) return;
     const value = Number(event.target.value);
+    const paramKey = `${body.id}:${event.target.dataset.param}`;
+    if (state.activeParamEdit !== paramKey) {
+      pushHistory();
+      state.activeParamEdit = paramKey;
+    }
     if (event.target.dataset.param === "volume") {
       body.volume = value;
       if (body.activeSample && body.activeSample.gain) {
@@ -1335,16 +1656,60 @@
       body.colorTone = value;
       row.style.setProperty("--planet-color", planetColorCss(body, 0.82));
     }
+    if (event.target.dataset.param === "sliceStart") {
+      body.sliceStart = Math.min(value, sampleSlice(body).end - 0.02);
+      event.target.value = String(body.sliceStart);
+    }
+    if (event.target.dataset.param === "sliceEnd") {
+      body.sliceEnd = Math.max(value, sampleSlice(body).start + 0.02);
+      event.target.value = String(body.sliceEnd);
+    }
+    if (event.target.dataset.param === "sliceStart" || event.target.dataset.param === "sliceEnd") {
+      const slice = sampleSlice(body);
+      const inLine = row.querySelector(".waveform .slice-in");
+      const outLine = row.querySelector(".waveform .slice-out");
+      const range = row.querySelector(".waveform .slice-range");
+      const inX = String(slice.start * 100);
+      const outX = String(slice.end * 100);
+      if (inLine) {
+        inLine.setAttribute("x1", inX);
+        inLine.setAttribute("x2", inX);
+      }
+      if (outLine) {
+        outLine.setAttribute("x1", outX);
+        outLine.setAttribute("x2", outX);
+      }
+      if (range) {
+        range.setAttribute("x", inX);
+        range.setAttribute("width", String(Math.max(0.5, (slice.end - slice.start) * 100)));
+      }
+    }
     const output = event.target.parentElement.querySelector("output");
     if (output) {
       if (event.target.dataset.param === "volume") {
         output.textContent = String(Math.round(body.volume * 100));
       } else if (event.target.dataset.param === "pitch") {
         output.textContent = String(Math.round(body.pitch * 10) / 10);
+      } else if (event.target.dataset.param === "sliceStart") {
+        output.textContent = String(Math.round(sampleSlice(body).start * 100));
+      } else if (event.target.dataset.param === "sliceEnd") {
+        output.textContent = String(Math.round(sampleSlice(body).end * 100));
       }
     }
   });
 
+  planetList.addEventListener("change", () => {
+    state.activeParamEdit = "";
+  });
+
+  if (undoButton) undoButton.addEventListener("click", undoLast);
+  if (velocityToggle) {
+    velocityToggle.addEventListener("click", () => {
+      state.velocityEnabled = !state.velocityEnabled;
+      velocityToggle.classList.toggle("active", state.velocityEnabled);
+      velocityToggle.setAttribute("aria-pressed", String(state.velocityEnabled));
+    });
+  }
   recordButton.addEventListener("click", () => {
     if (state.recording) stopRecording();
     else if (state.recordingReady) saveRecording();
@@ -1357,13 +1722,17 @@
     if (state.stopped) startTransport();
     else stopTransport();
   });
-  clearButton.addEventListener("click", resetField);
+  clearButton.addEventListener("click", () => resetField(true));
 
   canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
   canvas.addEventListener("pointermove", onPointerMove, { passive: false });
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
   canvas.addEventListener("lostpointercapture", onPointerUp);
+  canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", onTouchEnd, { passive: false });
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     const screen = screenPosition(event);
@@ -1381,6 +1750,9 @@
       });
       requestWakeLock();
     }
+  });
+  window.addEventListener("pointerup", () => {
+    state.activeParamEdit = "";
   });
   window.addEventListener("resize", () => {
     resize();
